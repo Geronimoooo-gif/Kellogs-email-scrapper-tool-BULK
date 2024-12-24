@@ -9,8 +9,11 @@ import subprocess
 import sys
 import tempfile
 import os
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from lxml import html
 
-def process_single_url(url):
+def process_single_url(url, timeout=30):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(f"""
 import scrapy
@@ -18,6 +21,7 @@ import re
 from scrapy.crawler import CrawlerProcess
 from urllib.parse import urlparse
 import html
+from lxml import html as lxml_html
 
 class EmailSpider(scrapy.Spider):
     name = "email_spider"
@@ -43,35 +47,24 @@ class EmailSpider(scrapy.Spider):
 
     def parse(self, response):
         try:
-            # Décode le contenu HTML
-            html_content = response.body.decode(response.encoding or 'utf-8')
+            # Utiliser lxml pour un parsing plus rapide
+            tree = lxml_html.fromstring(response.body)
             
-            # Recherche les emails encodés en ASCII (par exemple &#64; pour @)
-            ascii_content = html.unescape(html_content)
+            # Extraire le texte directement avec XPath
+            text_content = ' '.join(tree.xpath('//text()'))
             
-            # Nettoie le HTML
-            html_without_scripts = re.sub(r'<script.*?>.*?</script>', '', ascii_content, flags=re.DOTALL)
-            html_without_styles = re.sub(r'<style.*?>.*?</style>', '', html_without_scripts, flags=re.DOTALL)
-            text_content = re.sub(r'<[^>]+>', ' ', html_without_styles)
-            cleaned_text = ' '.join(text_content.split())
+            # Pattern combiné pour tous les types d'emails
+            email_pattern = r'[a-zA-Z0-9._%+-]+(?:@|&#64;|&#x40;|%40|＠)[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}'
             
-            # Pattern pour les emails standards et potentiellement encodés
-            email_pattern = r'[a-zA-Z0-9._%+-]+[@＠]{{1}}[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}'
-            emails_found = re.findall(email_pattern, cleaned_text)
+            # Trouver tous les emails en une seule passe
+            all_emails = set(re.findall(email_pattern, text_content))
             
-            # Pattern pour détecter les emails avec @ encodé en ASCII
-            ascii_pattern = r'[a-zA-Z0-9._%+-]+(?:&#64;|&#x40;|%40)[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}'
-            ascii_emails = re.findall(ascii_pattern, html_content)
+            # Décodage HTML pour les emails encodés
+            decoded_emails = set(html.unescape(email) for email in all_emails)
             
-            # Décode les emails trouvés avec @ encodé
-            decoded_ascii_emails = [html.unescape(email) for email in ascii_emails]
-            
-            # Combine et nettoie tous les emails trouvés
-            all_found_emails = set(emails_found + decoded_ascii_emails)
-            
-            if all_found_emails:
-                print(f"Emails trouvés sur {{response.url}}: {{list(all_found_emails)}}", flush=True)
-                self.all_emails.update(all_found_emails)
+            if decoded_emails:
+                print(f"Emails trouvés sur {{response.url}}: {{list(decoded_emails)}}", flush=True)
+                self.all_emails.update(decoded_emails)
             
         except Exception as e:
             print(f"Erreur lors du parsing: {{str(e)}}", flush=True)
@@ -79,9 +72,15 @@ class EmailSpider(scrapy.Spider):
         return None
 
 process = CrawlerProcess(settings={{
-    "LOG_ENABLED": True,
+    "LOG_ENABLED": False,
     "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "ROBOTSTXT_OBEY": False,
+    "CONCURRENT_REQUESTS": 32,
+    "CONCURRENT_REQUESTS_PER_DOMAIN": 16,
+    "DOWNLOAD_TIMEOUT": 15,
+    "COOKIES_ENABLED": False,
+    "RETRY_ENABLED": False,
+    "DOWNLOAD_DELAY": 0,
 }})
 
 process.crawl(EmailSpider, url="{url}")
@@ -89,15 +88,13 @@ process.start()
 """)
 
     try:
-        # Exécuter le script temporaire
         process = subprocess.Popen([sys.executable, f.name],
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,
                                  universal_newlines=True)
         
-        stdout, stderr = process.communicate()
+        stdout, stderr = process.communicate(timeout=timeout)
         
-        # Supprimer le fichier temporaire
         os.unlink(f.name)
         
         # Debug: afficher la sortie complète
@@ -112,38 +109,50 @@ process.start()
         
         return ""
         
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return "Timeout"
     except Exception as e:
         print(f"Erreur dans process_single_url: {str(e)}")
         return f"Erreur: {str(e)}"
 
+# Déplacer process_csv en dehors de process_single_url
 def process_csv(df, progress_bar, status_text):
-    """Traite le fichier CSV"""
-    # Créer une copie du DataFrame pour éviter les problèmes de modification
+    """Traite le fichier CSV avec du multiprocessing"""
     df_result = df.copy()
     
-    # S'assurer que la colonne Mail existe
     if 'Mail' not in df_result.columns:
         df_result['Mail'] = ''
     
     total_urls = len(df_result)
+    processed = 0
     
-    for index, row in df_result.iterrows():
-        status_text.text(f"Traitement de l'URL {index + 1}/{total_urls}")
-        if pd.notna(row['URL']):
-            try:
-                print(f"Processing URL: {row['URL']}")  # Debug
-                url = row['URL'].strip()
-                emails = process_single_url(url)
-                print(f"Emails found: {emails}")  # Debug
-                
-                # Mettre à jour directement le DataFrame
-                df_result.loc[index, 'Mail'] = emails
-                
-            except Exception as e:
-                print(f"Error processing URL: {str(e)}")  # Debug
-                df_result.loc[index, 'Mail'] = f"Erreur: {str(e)}"
+    # Nombre de workers (processus parallèles)
+    max_workers = multiprocessing.cpu_count() * 2
+    
+    # Créer un dictionnaire des URLs à traiter
+    url_dict = {index: row['URL'].strip() 
+                for index, row in df_result.iterrows() 
+                if pd.notna(row['URL'])}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Soumettre les tâches
+        future_to_url = {executor.submit(process_single_url, url): (index, url) 
+                        for index, url in url_dict.items()}
         
-        progress_bar.progress((index + 1) / total_urls)
+        # Traiter les résultats au fur et à mesure
+        for future in as_completed(future_to_url):
+            index, url = future_to_url[future]
+            try:
+                emails = future.result()
+                df_result.loc[index, 'Mail'] = emails
+            except Exception as e:
+                print(f"Error processing URL {url}: {str(e)}")
+                df_result.loc[index, 'Mail'] = f"Erreur: {str(e)}"
+            
+            processed += 1
+            progress_bar.progress(processed / total_urls)
+            status_text.text(f"Traitement de l'URL {processed}/{total_urls}")
     
     return df_result
 
@@ -181,12 +190,22 @@ def main():
                 if 'URL' not in df.columns:
                     st.error("Le fichier CSV doit contenir une colonne 'URL'")
                 else:
+                    total_urls = len(df)
+                    st.write(f"Nombre total d'URLs à traiter : {total_urls}")
+                    
                     if st.button("Scanner les URLs du CSV"):
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         
                         # Traiter le CSV et obtenir les résultats
                         results_df = process_csv(df, progress_bar, status_text)
+                        
+                        # Statistiques des résultats
+                        emails_found = results_df['Mail'].notna().sum()
+                        success_rate = (emails_found / total_urls) * 100
+                        
+                        # Afficher les statistiques
+                        st.write(f"URLs traitées avec succès : {emails_found}/{total_urls} ({success_rate:.2f}%)")
                         
                         # Convertir en CSV
                         csv = results_df.to_csv(index=False)
