@@ -47,10 +47,16 @@ class EmailSpider(scrapy.Spider):
 
     def parse(self, response):
         try:
-            # Utiliser lxml pour un parsing plus rapide
-            tree = lxml_html.fromstring(response.body)
+            # Décode le contenu HTML
+            html_content = response.body.decode(response.encoding or 'utf-8')
             
-            # Extraire le texte directement avec XPath
+            # Supprime le contenu des balises script
+            html_without_scripts = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL)
+            
+            # Utiliser lxml pour parser le HTML nettoyé
+            tree = lxml_html.fromstring(html_without_scripts)
+            
+            # Extraire le texte
             text_content = ' '.join(tree.xpath('//text()'))
             
             # Pattern combiné pour tous les types d'emails
@@ -116,7 +122,6 @@ process.start()
         print(f"Erreur dans process_single_url: {str(e)}")
         return f"Erreur: {str(e)}"
 
-# Déplacer process_csv en dehors de process_single_url
 def process_csv(df, progress_bar, status_text):
     """Traite le fichier CSV avec du multiprocessing"""
     df_result = df.copy()
