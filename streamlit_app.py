@@ -35,15 +35,18 @@ class EmailSpider(scrapy.Spider):
         self.start_urls = [
             base_url,
             f"{{base_url}}/contact/",
+            f"{{base_url}}/mentions-legales/",  # Page mentions légales
             self.url
         ]
         self.all_emails = set()
+        self.all_phones = set()
 
     def closed(self, reason):
-        if self.all_emails:
-            print(f"FINAL_RESULTS:{{','.join(self.all_emails)}}", flush=True)
-        else:
-            print("FINAL_RESULTS:", flush=True)
+        results = {{
+            'emails': ','.join(self.all_emails) if self.all_emails else '',
+            'phones': ','.join(self.all_phones) if self.all_phones else ''
+        }}
+        print(f"FINAL_RESULTS:{{results}}", flush=True)
 
     def parse(self, response):
         try:
@@ -59,18 +62,52 @@ class EmailSpider(scrapy.Spider):
             # Extraire le texte
             text_content = ' '.join(tree.xpath('//text()'))
             
-            # Pattern combiné pour tous les types d'emails
+            # Pattern pour les emails
             email_pattern = r'[a-zA-Z0-9._%+-]+(?:@|&#64;|&#x40;|%40|＠)[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}'
             
-            # Trouver tous les emails en une seule passe
+            # Pattern pour les numéros de téléphone français
+            phone_patterns = [
+                r'(?:(?:\+|00)33|0)\s*[1-9](?:[\s.-]*\d{{2}}){{4}}',  # Format standard
+                r'(?:(?:\+|00)33|0)\s*[1-9](?:&nbsp;\d{{2}}){{4}}',   # Format avec &nbsp;
+            ]
+            
+            # Trouver tous les emails
             all_emails = set(re.findall(email_pattern, text_content))
             
-            # Décodage HTML pour les emails encodés
+            # Trouver tous les numéros de téléphone
+            all_phones = set()
+            for pattern in phone_patterns:
+                phones = re.findall(pattern, text_content)
+                all_phones.update(phones)
+            
+            # Décodage HTML pour les emails
             decoded_emails = set(html.unescape(email) for email in all_emails)
+            
+            # Nettoyage des numéros de téléphone
+            cleaned_phones = set()
+            for phone in all_phones:
+                # Nettoyer le numéro
+                clean_phone = re.sub(r'[^\d+]', '', phone)
+                
+                # Convertir +33 en 0
+                if clean_phone.startswith('+33'):
+                    clean_phone = '0' + clean_phone[3:]
+                elif clean_phone.startswith('0033'):
+                    clean_phone = '0' + clean_phone[4:]
+                
+                # Vérifier si c'est un numéro français valide
+                if len(clean_phone) == 10 and clean_phone.startswith(('01', '02', '03', '04', '05', '06', '07', '08', '09')):
+                    # Formater le numéro
+                    formatted_phone = f"{{clean_phone[0:2]}} {{clean_phone[2:4]}} {{clean_phone[4:6]}} {{clean_phone[6:8]}} {{clean_phone[8:10]}}"
+                    cleaned_phones.add(formatted_phone)
             
             if decoded_emails:
                 print(f"Emails trouvés sur {{response.url}}: {{list(decoded_emails)}}", flush=True)
                 self.all_emails.update(decoded_emails)
+            
+            if cleaned_phones:
+                print(f"Téléphones trouvés sur {{response.url}}: {{list(cleaned_phones)}}", flush=True)
+                self.all_phones.update(cleaned_phones)
             
         except Exception as e:
             print(f"Erreur lors du parsing: {{str(e)}}", flush=True)
@@ -110,17 +147,21 @@ process.start()
         # Extraire les résultats
         for line in stdout.splitlines():
             if line.startswith("FINAL_RESULTS:"):
-                emails = line.replace("FINAL_RESULTS:", "").strip()
-                return emails if emails else ""
+                results_str = line.replace("FINAL_RESULTS:", "").strip()
+                try:
+                    results = eval(results_str)
+                    return results['emails'], results['phones']
+                except:
+                    return "", ""
         
-        return ""
+        return "", ""
         
     except subprocess.TimeoutExpired:
         process.kill()
-        return "Timeout"
+        return "Timeout", "Timeout"
     except Exception as e:
         print(f"Erreur dans process_single_url: {str(e)}")
-        return f"Erreur: {str(e)}"
+        return f"Erreur: {str(e)}", f"Erreur: {str(e)}"
 
 def process_csv(df, progress_bar, status_text):
     """Traite le fichier CSV avec du multiprocessing"""
@@ -128,6 +169,8 @@ def process_csv(df, progress_bar, status_text):
     
     if 'Mail' not in df_result.columns:
         df_result['Mail'] = ''
+    if 'Telephone' not in df_result.columns:
+        df_result['Telephone'] = ''
     
     total_urls = len(df_result)
     processed = 0
@@ -149,11 +192,13 @@ def process_csv(df, progress_bar, status_text):
         for future in as_completed(future_to_url):
             index, url = future_to_url[future]
             try:
-                emails = future.result()
+                emails, phones = future.result()
                 df_result.loc[index, 'Mail'] = emails
+                df_result.loc[index, 'Telephone'] = phones
             except Exception as e:
                 print(f"Error processing URL {url}: {str(e)}")
                 df_result.loc[index, 'Mail'] = f"Erreur: {str(e)}"
+                df_result.loc[index, 'Telephone'] = f"Erreur: {str(e)}"
             
             processed += 1
             progress_bar.progress(processed / total_urls)
@@ -162,7 +207,7 @@ def process_csv(df, progress_bar, status_text):
     return df_result
 
 def main():
-    st.title("Scraper d'adresses email")
+    st.title("Scraper d'adresses email et numéros de téléphone")
 
     if 'crawler_running' not in st.session_state:
         st.session_state.crawler_running = False
@@ -175,11 +220,14 @@ def main():
             if url_input:
                 try:
                     with st.spinner('Scan en cours...'):
-                        emails = process_single_url(url_input)
-                        if emails:
-                            st.success(f"Adresses email trouvées : {emails}")
+                        emails, phones = process_single_url(url_input)
+                        if emails or phones:
+                            if emails:
+                                st.success(f"Adresses email trouvées : {emails}")
+                            if phones:
+                                st.success(f"Numéros de téléphone trouvés : {phones}")
                         else:
-                            st.warning("Aucune adresse email trouvée.")
+                            st.warning("Aucune adresse email ni numéro de téléphone trouvé.")
                 except Exception as e:
                     st.error(f"Erreur : {str(e)}")
             else:
@@ -207,10 +255,14 @@ def main():
                         
                         # Statistiques des résultats
                         emails_found = results_df['Mail'].notna().sum()
-                        success_rate = (emails_found / total_urls) * 100
+                        phones_found = results_df['Telephone'].notna().sum()
+                        success_rate = ((emails_found + phones_found) / (total_urls * 2)) * 100
                         
                         # Afficher les statistiques
-                        st.write(f"URLs traitées avec succès : {emails_found}/{total_urls} ({success_rate:.2f}%)")
+                        st.write(f"URLs traitées avec succès : {total_urls}")
+                        st.write(f"Emails trouvés : {emails_found}")
+                        st.write(f"Téléphones trouvés : {phones_found}")
+                        st.write(f"Taux de succès : {success_rate:.2f}%")
                         
                         # Convertir en CSV
                         csv = results_df.to_csv(index=False)
@@ -233,22 +285,25 @@ def main():
                 st.error(f"Erreur lors du traitement du fichier : {str(e)}")
 
     st.markdown("""
-    ### Instructions d'utilisation :
-    1. **Pour une URL unique** : 
-       - Entrez l'URL dans le champ de texte
-       - Cliquez sur "Scanner une URL"
-    
-    2. **Pour plusieurs URLs** :
-       - Préparez un fichier CSV avec une colonne 'URL'
-       - Téléchargez le fichier
-       - Cliquez sur "Scanner les URLs du CSV"
-       - Téléchargez les résultats
-    
-    **Note** : Le scraper scanne automatiquement :
-    - L'URL fournie
-    - La page d'accueil
-    - La page contact (/contact/)
-    """)
+### Instructions d'utilisation :
+1. **Pour une URL unique** : 
+   - Entrez l'URL dans le champ de texte
+   - Cliquez sur "Scanner une URL"
+
+2. **Pour plusieurs URLs** :
+   - Préparez un fichier CSV avec une colonne 'URL'
+   - Téléchargez le fichier
+   - Cliquez sur "Scanner les URLs du CSV"
+   - Téléchargez les résultats
+
+**Note** : Le scraper scanne automatiquement :
+- L'URL fournie
+- La page d'accueil
+- La page contact (/contact/)
+- La page mentions légales (/mentions-legales/)
+
+Les numéros de téléphone détectés sont uniquement les numéros français valides (10 chiffres commençant par 01-09).
+""")
 
 if __name__ == "__main__":
     main()
