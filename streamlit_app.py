@@ -10,6 +10,7 @@ import sys
 import tempfile
 import os
 import multiprocessing
+import chardet
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from lxml import html
 
@@ -165,6 +166,19 @@ process.start()
         print(f"Erreur dans process_single_url: {str(e)}")
         return f"Erreur: {str(e)}", f"Erreur: {str(e)}"
 
+def read_csv_with_encoding(uploaded_file):
+    # Lire les 100 premiers KB pour détecter l'encodage
+    raw_data = uploaded_file.read(100000)
+    uploaded_file.seek(0)  # Retour au début du fichier
+
+    # Détecter l'encodage
+    result = chardet.detect(raw_data)
+    detected_encoding = result['encoding']
+
+    # Lire le fichier avec l'encodage détecté
+    df = pd.read_csv(uploaded_file, encoding=detected_encoding)
+    return df
+    
 def process_csv(df, progress_bar, status_text):
     """Traite le fichier CSV avec du multiprocessing"""
     df_result = df.copy()
@@ -240,7 +254,7 @@ def main():
         if uploaded_file is not None:
             try:
                 # Lire le CSV
-                df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
+                df = read_csv_with_encoding(uploaded_file)
                 
                 if 'URL' not in df.columns:
                     st.error("Le fichier CSV doit contenir une colonne 'URL'")
