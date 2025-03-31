@@ -238,7 +238,7 @@ def main():
         if uploaded_file is not None:
             try:
                 # Lire le CSV
-                df = pd.read_csv(uploaded_file)
+                df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
                 
                 if 'URL' not in df.columns:
                     st.error("Le fichier CSV doit contenir une colonne 'URL'")
