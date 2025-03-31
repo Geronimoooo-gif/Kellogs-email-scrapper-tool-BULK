@@ -1,325 +1,421 @@
-import scrapy
-import re
 import streamlit as st
-from scrapy.crawler import CrawlerProcess
-from urllib.parse import urlparse
 import pandas as pd
+import requests
+import time
+from datetime import datetime
+import logging
 import io
-import subprocess
-import sys
-import tempfile
-import os
-import multiprocessing
-import chardet
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from lxml import html
 
-def process_single_url(url, timeout=30):
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(f"""
-import scrapy
-import re
-from scrapy.crawler import CrawlerProcess
-from urllib.parse import urlparse
-import html
-from lxml import html as lxml_html
+# Configuration des logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class EmailSpider(scrapy.Spider):
-    name = "email_spider"
-
-    def __init__(self, url=None, *args, **kwargs):
-        super(EmailSpider, self).__init__(*args, **kwargs)
-        self.url = "{url}"
-        parsed_url = urlparse(self.url)
-        base_url = f"{{parsed_url.scheme}}://{{parsed_url.netloc}}"
+class ValueSerpAPI:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://api.valueserp.com/search"
+    
+    def search(self, query, start=0):
+        """Effectue une recherche via l'API ValueSerp"""
+        params = {
+            'api_key': self.api_key,
+            'q': query,
+            'location': 'France',
+            'gl': 'fr',
+            'hl': 'fr',
+            'google_domain': 'google.fr',
+            'start': start,
+            'num': 100,
+            'output': 'json',
+            'include_html': 'false',
+            'device': 'desktop'
+        }
         
-        self.start_urls = [
-            base_url,
-            f"{{base_url}}/contact/",
-            f"{{base_url}}/mentions-legales/",  # Page mentions légales
-            self.url
-        ]
-        self.all_emails = set()
-        self.all_phones = set()
-
-    def closed(self, reason):
-        results = {{
-            'emails': ','.join(self.all_emails) if self.all_emails else '',
-            'phones': ','.join(self.all_phones) if self.all_phones else ''
-        }}
-        print(f"FINAL_RESULTS:{{results}}", flush=True)
-
-    def parse(self, response):
         try:
-            # Décode le contenu HTML
-            html_content = response.body
-            encoding = response.encoding or 'utf-8'  # Si l'encodage est absent, on utilise UTF-8 par défaut
-            html_content = html_content.decode(encoding, errors='replace')  # Remplace ou ignore les erreurs
-            
-            # Supprime le contenu des balises script
-            html_without_scripts = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL)
-            
-            # Utiliser lxml pour parser le HTML nettoyé
-            tree = lxml_html.fromstring(html_without_scripts)
-            
-            # Extraire le texte
-            text_content = ' '.join(tree.xpath('//text()'))
-            
-            # Pattern pour les emails
-            email_pattern = r'[a-zA-Z0-9._%+-]+(?:@|&#64;|&#x40;|%40|＠)[a-zA-Z0-9.-]+\.[a-zA-Z]{{2,}}'
-            
-            # Pattern pour les numéros de téléphone français
-            phone_patterns = [
-                r'(?:(?:\+|00)33|0)\s*[1-9](?:[\s.-]*\d{{2}}){{4}}',  # Format standard
-                r'(?:(?:\+|00)33|0)\s*[1-9](?:&nbsp;\d{{2}}){{4}}',   # Format avec &nbsp;
-            ]
-            
-            # Trouver tous les emails
-            all_emails = set(re.findall(email_pattern, text_content))
-            
-            # Trouver tous les numéros de téléphone
-            all_phones = set()
-            for pattern in phone_patterns:
-                phones = re.findall(pattern, text_content)
-                all_phones.update(phones)
-            
-            # Décodage HTML pour les emails
-            decoded_emails = set(html.unescape(email) for email in all_emails)
-            
-            # Nettoyage des numéros de téléphone
-            cleaned_phones = set()
-            for phone in all_phones:
-                # Nettoyer le numéro
-                clean_phone = re.sub(r'[^\d+]', '', phone)
-                
-                # Convertir +33 en 0
-                if clean_phone.startswith('+33'):
-                    clean_phone = '0' + clean_phone[3:]
-                elif clean_phone.startswith('0033'):
-                    clean_phone = '0' + clean_phone[4:]
-                
-                # Vérifier si c'est un numéro français valide
-                if len(clean_phone) == 10 and clean_phone.startswith(('01', '02', '03', '04', '05', '06', '07', '08', '09')):
-                    # Formater le numéro
-                    formatted_phone = f"{{clean_phone[0:2]}} {{clean_phone[2:4]}} {{clean_phone[4:6]}} {{clean_phone[6:8]}} {{clean_phone[8:10]}}"
-                    cleaned_phones.add(formatted_phone)
-            
-            if decoded_emails:
-                print(f"Emails trouvés sur {{response.url}}: {{list(decoded_emails)}}", flush=True)
-                self.all_emails.update(decoded_emails)
-            
-            if cleaned_phones:
-                print(f"Téléphones trouvés sur {{response.url}}: {{list(cleaned_phones)}}", flush=True)
-                self.all_phones.update(cleaned_phones)
-            
-        except Exception as e:
-            print(f"Erreur lors du parsing: {{str(e)}}", flush=True)
-        
-        return None
+            response = requests.get(self.base_url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Erreur lors de la requête API: {str(e)}")
+            return None
 
-process = CrawlerProcess(settings={{
-    "LOG_ENABLED": False,
-    "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "ROBOTSTXT_OBEY": False,
-    "CONCURRENT_REQUESTS": 32,
-    "CONCURRENT_REQUESTS_PER_DOMAIN": 16,
-    "DOWNLOAD_TIMEOUT": 15,
-    "COOKIES_ENABLED": False,
-    "RETRY_ENABLED": False,
-    "DOWNLOAD_DELAY": 0,
-}})
-
-process.crawl(EmailSpider, url="{url}")
-process.start()
-""")
-
-    try:
-        process = subprocess.Popen([sys.executable, f.name],
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE,
-                                 universal_newlines=True)
-        
-        stdout, stderr = process.communicate(timeout=timeout)
-        
-        os.unlink(f.name)
-        
-        # Debug: afficher la sortie complète
-        print("Stdout:", stdout)
-        print("Stderr:", stderr)
-        
-        # Extraire les résultats
-        for line in stdout.splitlines():
-            if line.startswith("FINAL_RESULTS:"):
-                results_str = line.replace("FINAL_RESULTS:", "").strip()
-                try:
-                    results = eval(results_str)
-                    return results['emails'], results['phones']
-                except:
-                    return "", ""
-        
-        return "", ""
-        
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return "Timeout", "Timeout"
-    except Exception as e:
-        print(f"Erreur dans process_single_url: {str(e)}")
-        return f"Erreur: {str(e)}", f"Erreur: {str(e)}"
-
-def read_csv_with_encoding(uploaded_file):
-    # Lire les 100 premiers KB pour détecter l'encodage
-    raw_data = uploaded_file.read(100000)
-    uploaded_file.seek(0)  # Retour au début du fichier
-
-    # Détecter l'encodage
-    result = chardet.detect(raw_data)
-    detected_encoding = result['encoding']
-
-    # Lire le fichier avec l'encodage détecté
-    df = pd.read_csv(uploaded_file, encoding=detected_encoding)
-    return df
+def scrape_google_urls(query, max_results=200, progress_bar=None):
+    """Scrape les résultats Google via ValueSerp"""
+    results = []
     
-def process_csv(df, progress_bar, status_text):
-    """Traite le fichier CSV avec du multiprocessing"""
-    df_result = df.copy()
+    api_key = st.secrets["VALUESERP_API_KEY"]
+    api = ValueSerpAPI(api_key)
     
-    if 'Mail' not in df_result.columns:
-        df_result['Mail'] = ''
-    if 'Telephone' not in df_result.columns:
-        df_result['Telephone'] = ''
+    # Calculer le nombre de requêtes nécessaires (100 résultats par requête)
+    num_requests = (max_results + 99) // 100  # Arrondi supérieur
     
-    total_urls = len(df_result)
-    processed = 0
-    
-    # Nombre de workers (processus parallèles)
-    max_workers = multiprocessing.cpu_count() * 2
-    
-    # Créer un dictionnaire des URLs à traiter
-    url_dict = {index: row['URL'].strip() 
-                for index, row in df_result.iterrows() 
-                if pd.notna(row['URL'])}
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Soumettre les tâches
-        future_to_url = {executor.submit(process_single_url, url): (index, url) 
-                        for index, url in url_dict.items()}
+    for i in range(num_requests):
+        start = i * 100
+        if progress_bar:
+            progress = (start + 100) / max_results
+            progress_bar.progress(min(progress, 1.0))
         
-        # Traiter les résultats au fur et à mesure
-        for future in as_completed(future_to_url):
-            index, url = future_to_url[future]
-            try:
-                emails, phones = future.result()
-                df_result.loc[index, 'Mail'] = emails
-                df_result.loc[index, 'Telephone'] = phones
-            except Exception as e:
-                print(f"Error processing URL {url}: {str(e)}")
-                df_result.loc[index, 'Mail'] = f"Erreur: {str(e)}"
-                df_result.loc[index, 'Telephone'] = f"Erreur: {str(e)}"
+        logger.info(f"Récupération des résultats {start+1} à {min(start+100, max_results)}")
+        
+        response_data = api.search(query, start=start)
+        
+        if not response_data:
+            logger.error("Pas de réponse de l'API")
+            break
             
-            processed += 1
-            progress_bar.progress(processed / total_urls)
-            status_text.text(f"Traitement de l'URL {processed}/{total_urls}")
+        organic_results = response_data.get('organic_results', [])
+        
+        if not organic_results:
+            logger.warning(f"Aucun résultat trouvé à partir de l'index {start}")
+            break
+            
+        for position, result in enumerate(organic_results, start=start+1):
+            if len(results) >= max_results:
+                break
+            url = result.get('link')
+            if url:
+                results.append({
+                    "Position": position,
+                    "URL": url
+                })
+        
+        if len(results) >= max_results:
+            break
+            
+        logger.info(f"Trouvé {len(organic_results)} résultats pour la page {i+1}")
+        time.sleep(1)
     
-    return df_result
+    logger.info(f"Scraping terminé. Nombre total de résultats: {len(results)}")
+    return results[:max_results]
+
+def create_csv_files(dataframes):
+    """Crée des fichiers CSV pour chaque dataframe et les stocke en mémoire."""
+    output_files = {}
+    
+    for sheet_name, df in dataframes.items():
+        clean_sheet_name = sheet_name.replace(" ", "_")[:31] + ".csv"
+        
+        output = io.BytesIO()
+        df.to_csv(output, index=False, encoding='utf-8')
+        output.seek(0)
+        
+        output_files[clean_sheet_name] = output
+    
+    return output_files
 
 def main():
-    st.title("Scraper d'adresses email et numéros de téléphone")
-
-    if 'crawler_running' not in st.session_state:
-        st.session_state.crawler_running = False
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        url_input = st.text_input("Entrez une URL à scraper :")
-        if st.button("Scanner une URL"):
-            if url_input:
-                try:
-                    with st.spinner('Scan en cours...'):
-                        emails, phones = process_single_url(url_input)
-                        if emails or phones:
-                            if emails:
-                                st.success(f"Adresses email trouvées : {emails}")
-                            if phones:
-                                st.success(f"Numéros de téléphone trouvés : {phones}")
-                        else:
-                            st.warning("Aucune adresse email ni numéro de téléphone trouvé.")
-                except Exception as e:
-                    st.error(f"Erreur : {str(e)}")
-            else:
-                st.error("Veuillez entrer une URL valide.")
-
-    with col2:
-        uploaded_file = st.file_uploader("Ou téléchargez un fichier CSV", type=['csv'])
-        if uploaded_file is not None:
-            try:
-                # Lire le CSV
-                df = read_csv_with_encoding(uploaded_file)
+    st.title("🔍 Scraper Google Search via ValueSerp")
+    
+    if "VALUESERP_API_KEY" not in st.secrets:
+        st.error("Clé API ValueSerp manquante. Veuillez configurer vos secrets Streamlit.")
+        return
+    
+    # Liste des villes
+    default_cities = """Paris
+Paris 1er arrondissemeeent2
+Paris 2e arrondissement
+Paris 3e arrondissement
+Paris 4e arrondissement
+Paris 5e arrondissement
+Paris 6e arrondissement
+Paris 7e arrondissement
+Paris 8e arrondissement
+Paris 9e arrondissement
+Paris 10e arrondissement
+Paris 11e arrondissement
+Paris 12e arrondissement
+Paris 13e arrondissement
+Paris 14e arrondissement
+Paris 15e arrondissement
+Paris 16e arrondissement
+Paris 17e arrondissement
+Paris 18e arrondissement
+Paris 19e arrondissement
+Paris 20e arrondissement
+Marseille
+Lyon
+Toulouse
+Nice
+Nantes
+Strasbourg
+Montpellier
+Bordeaux
+Lille
+Rennes
+Reims
+Saint-Etienne
+Toulon
+Le Havre
+Grenoble
+Dijon
+Angers
+Nimes
+Villeurbanne
+Clermont-Ferrand
+Saint-Denis
+Le Mans
+Aix-en-Provence
+Brest
+Tours
+Amiens
+Limoges
+Annecy
+Perpignan
+Boulogne-Billancourt
+Metz
+Besancon
+Orleans
+Saint-Denis
+Rouen
+Argenteuil
+Mulhouse
+Montreuil
+Caen
+Nancy
+Saint-Paul
+Roubaix
+Tourcoing
+Nanterre
+Vitry-sur-Seine
+Avignon
+Creteil
+Poitiers
+Dunkerque
+Asnieres-sur-Seine
+Courbevoie
+Versailles
+Colombes
+Fort-de-France
+Aulnay-sous-Bois
+Saint-Pierre
+Rueil-Malmaison
+Pau
+Aubervilliers
+Champigny-sur-Marne
+Le Tampon
+Antibes
+Saint-Maur-des-Fosses
+Cannes
+Drancy
+Merignac
+Saint-Nazaire
+Colmar
+Issy-les-Moulineaux
+Noisy-le-Grand
+Evry-Courcouronnes
+Levallois-Perret
+Troyes
+Neuilly-sur-Seine
+Sarcelles
+Venissieux
+Clichy
+Pessac
+Ivry-sur-Seine
+Cergy
+Quimper
+La Rochelle
+Beziers
+Ajaccio
+Saint-Quentin
+Niort
+Villejuif
+Hyeres
+Pantin
+Chambery
+Le Blanc-Mesnil
+Lorient
+Les Abymes
+Montauban
+Sainte-Genevieve-des-Bois
+Suresnes
+Meaux
+Valence
+Beauvais
+Cholet
+Chelles
+Bondy
+Frejus
+Clamart
+Narbonne
+Bourg-en-Bresse
+Fontenay-sous-Bois
+Bayonne
+Sevran
+Antony
+Maisons-Alfort
+La Seyne-sur-Mer
+Epinay-sur-Seine
+Montrouge
+Saint-Herblain
+Calais
+Vincennes
+Macon
+Villepinte
+Martigues
+Bobigny
+Cherbourg-en-Cotentin
+Vannes
+Massy
+Brive-la-Gaillarde
+Arles
+Corbeil-Essonnes
+Saint-Andre
+Saint-Ouen-sur-Seine
+Albi
+Belfort
+Evreux
+La Roche-sur-Yon
+Saint-Malo
+Bagneux
+Chateauroux
+Noisy-le-Sec
+Salon-de-Provence
+Le Cannet
+Vaulx-en-Velin
+Livry-Gargan
+Angouleme
+Sete
+Puteaux
+Thionville
+Rosny-sous-Bois
+Saint-Laurent-du-Maroni
+Alfortville
+Istres
+Gennevilliers
+Wattrelos
+Talence
+Blois
+Tarbes
+Castres
+Garges-les-Gonesse
+Saint-Brieuc
+Arras
+Douai
+Compiegne
+Melun
+Reze
+Saint-Chamond
+Bourgoin-Jallieu
+Gap
+Montelimar
+Thonon-les-Bains
+Draguignan
+Chartres
+Joue-les-Tours
+Saint-Martin-dHeres
+Villefranche-sur-Saone
+Chalon-sur-Saone
+Mantes-la-Jolie
+Colomiers
+Anglet
+Pontault-Combault
+Poissy
+Savigny-sur-Orge
+Bagnolet
+Lievin
+Nevers
+Gagny
+Le Perreux-sur-Marne
+Stains
+Chalons-en-Champagne
+Conflans-Sainte-Honorine
+Montlucon
+Palaiseau
+Laval
+Saint-Priest
+LHay-les-Roses
+Brunoy
+Chatillon
+Sainte-Marie
+Bastia
+Lens
+Chambery
+Saint-Benoit
+Le Port
+Saint-Leu
+Noumea"""
+    
+    # Interface utilisateur
+    with st.container():
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            query = st.text_input(
+                "Entrez votre terme de recherche",
+                value="",
+                placeholder="Exemple: avocat",
+                help="Tapez votre terme de recherche principal"
+            )
+        
+        with col2:
+            cities = st.text_area(
+                "Liste des villes (une par ligne)",
+                value=default_cities,
+                height=100,
+                help="Entrez les villes, une par ligne"
+            )
+        
+        max_results = st.select_slider(
+            "Nombre de résultats à récupérer par ville",
+            options=[10, 20, 30, 50, 100, 200],
+            value=200,
+            help="Choisissez le nombre de résultats Google à récupérer par ville"
+        )
+        
+        # Calcul des coûts
+        cities_list = [city.strip() for city in cities.split('\n') if city.strip()]
+        num_requests_per_city = (max_results + 99) // 100
+        total_requests = num_requests_per_city * len(cities_list)
+        cost_per_request = 0.001
+        estimated_cost = total_requests * cost_per_request
+        
+        # Informations de coût dans la sidebar
+        st.sidebar.title("Estimation des coûts")
+        st.sidebar.write(f"Nombre de villes: {len(cities_list)}")
+        st.sidebar.write(f"Requêtes par ville: {num_requests_per_city}")
+        st.sidebar.write(f"Total requêtes: {total_requests}")
+        st.sidebar.write(f"Coût estimé: ${estimated_cost:.3f}")
+        
+        search_button = st.button("🔍 Lancer les recherches")
+        
+        if search_button:
+            if not query or not cities_list:
+                st.error("Veuillez entrer un terme de recherche et au moins une ville")
+                return
+            
+            progress_bar = st.progress(0)
+            all_results = {}
+            
+            for i, city in enumerate(cities_list):
+                full_query = f"{query} {city}"
+                st.text(f"Recherche en cours pour : {full_query}")
                 
-                if 'URL' not in df.columns:
-                    st.error("Le fichier CSV doit contenir une colonne 'URL'")
-                else:
-                    total_urls = len(df)
-                    st.write(f"Nombre total d'URLs à traiter : {total_urls}")
-                    
-                    if st.button("Scanner les URLs du CSV"):
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        # Traiter le CSV et obtenir les résultats
-                        results_df = process_csv(df, progress_bar, status_text)
-                        
-                        # Statistiques des résultats
-                        emails_found = results_df['Mail'].notna().sum()
-                        phones_found = results_df['Telephone'].notna().sum()
-                        success_rate = ((emails_found + phones_found) / (total_urls * 2)) * 100
-                        
-                        # Afficher les statistiques
-                        st.write(f"URLs traitées avec succès : {total_urls}")
-                        st.write(f"Emails trouvés : {emails_found}")
-                        st.write(f"Téléphones trouvés : {phones_found}")
-                        st.write(f"Taux de succès : {success_rate:.2f}%")
-                        
-                        # Convertir en CSV
-                        csv = results_df.to_csv(index=False)
-                        
-                        # Afficher un aperçu des résultats
-                        st.write("Aperçu des résultats :")
-                        st.write(results_df)
-                        
-                        # Bouton de téléchargement
-                        st.download_button(
-                            label="Télécharger les résultats",
-                            data=csv,
-                            file_name="resultats_scraping.csv",
-                            mime="text/csv"
-                        )
-                        
-                        status_text.text("Traitement terminé!")
-
-            except Exception as e:
-                st.error(f"Erreur lors du traitement du fichier : {str(e)}")
-
-    st.markdown("""
-### Instructions d'utilisation :
-1. **Pour une URL unique** : 
-   - Entrez l'URL dans le champ de texte
-   - Cliquez sur "Scanner une URL"
-
-2. **Pour plusieurs URLs** :
-   - Préparez un fichier CSV avec une colonne 'URL'
-   - Téléchargez le fichier
-   - Cliquez sur "Scanner les URLs du CSV"
-   - Téléchargez les résultats
-
-**Note** : Le scraper scanne automatiquement :
-- L'URL fournie
-- La page d'accueil
-- La page contact (/contact/)
-- La page mentions légales (/mentions-legales/)
-
-Les numéros de téléphone détectés sont uniquement les numéros français valides (10 chiffres commençant par 01-09).
-""")
+                data = scrape_google_urls(full_query, max_results, progress_bar)
+                if data:
+                    df = pd.DataFrame(data)
+                    all_results[full_query] = df
+                
+                progress = (i + 1) / len(cities_list)
+                progress_bar.progress(progress)
+            
+            if all_results:
+                st.success(f"Recherches terminées ! Résultats trouvés pour {len(all_results)} villes.")
+                
+                csv_files = create_csv_files(all_results)
+                
+                for filename, csv_buffer in csv_files.items():
+                    st.download_button(
+                        label=f"📥 Télécharger {filename}",
+                        data=csv_buffer,
+                        file_name=filename,
+                        mime="text/csv"
+                    )
+                
+                for query_city, df in all_results.items():
+                    with st.expander(f"Aperçu des résultats pour : {query_city}"):
+                        st.dataframe(df)
+            else:
+                st.error("Aucun résultat trouvé.")
 
 if __name__ == "__main__":
     main()
