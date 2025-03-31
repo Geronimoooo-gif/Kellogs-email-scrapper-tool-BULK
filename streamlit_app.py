@@ -51,7 +51,9 @@ class EmailSpider(scrapy.Spider):
     def parse(self, response):
         try:
             # Décode le contenu HTML
-            html_content = response.body.decode(response.encoding or 'utf-8')
+            html_content = response.body
+            encoding = response.encoding or 'utf-8'  # Si l'encodage est absent, on utilise UTF-8 par défaut
+            html_content = html_content.decode(encoding, errors='replace')  # Remplace ou ignore les erreurs
             
             # Supprime le contenu des balises script
             html_without_scripts = re.sub(r'<script.*?>.*?</script>', '', html_content, flags=re.DOTALL)
