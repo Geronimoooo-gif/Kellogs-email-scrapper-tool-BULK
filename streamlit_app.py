@@ -162,20 +162,9 @@ process = CrawlerProcess(settings={{
     "DOWNLOAD_DELAY": 0,
 }})
 
-def run_scraper(url):
-    process.crawl(EmailSpider, url=url)
-    process.start()
-
-# Search Function (Pseudo-code, please replace with actual implementation)
-def search_emails_in_engines(emails):
-    # This function would perform searches on specified engines and return results.
-    found_emails = []
-    for email in emails:
-        # Replace with your actual search logic for Google, Bing, etc.
-        print(f"Searching for {email} in search engines...")
-        # Simulate search:
-        found_emails.append(email)  # This is a placeholder; replace with actual results.
-    return found_emails
+process.crawl(EmailSpider, url="{url}")
+process.start()
+""")
 
     try:
         process = subprocess.Popen([sys.executable, f.name],
