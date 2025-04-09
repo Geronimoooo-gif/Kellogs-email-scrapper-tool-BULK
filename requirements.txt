@@ -1,3 +1,6 @@
 streamlit
 scrapy
 chardet
+lxml
+pandas
+pyfiglet
