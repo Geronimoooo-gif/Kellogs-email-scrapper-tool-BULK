@@ -14,6 +14,39 @@ import chardet
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from lxml import html
 
+def filter_emails(emails_string):
+    if not emails_string or emails_string == "":
+        return ""
+    
+    # Liste des domaines à exclure
+    excluded_domains = ["@ovh.com", "@ovh.net", "@simplebo.fr"]
+    
+    # Liste des préfixes à exclure
+    excluded_prefixes = [
+        "postmaster", "webmaster", "webmestre", 
+        "dpo", "rgpd", "dpd", "sales", "serviceclient"
+    ]
+    
+    filtered_emails = []
+    
+    # Traiter chaque email
+    for email in emails_string.split(','):
+        email = email.strip()
+        if not email:
+            continue
+        
+        # Vérifier si l'email contient un domaine exclu
+        if any(domain in email.lower() for domain in excluded_domains):
+            continue
+        
+        # Vérifier si l'email commence par un préfixe exclu
+        if any(email.lower().startswith(prefix + "@") for prefix in excluded_prefixes):
+            continue
+        
+        filtered_emails.append(email)
+    
+    return ','.join(filtered_emails)
+
 def process_single_url(url, timeout=30):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(f"""
@@ -153,7 +186,9 @@ process.start()
                 results_str = line.replace("FINAL_RESULTS:", "").strip()
                 try:
                     results = eval(results_str)
-                    return results['emails'], results['phones']
+                    # Filtrer les emails ici
+                    filtered_emails = filter_emails(results['emails'])
+                    return filtered_emails, results['phones']
                 except:
                     return "", ""
         
@@ -188,37 +223,44 @@ def process_csv(df, progress_bar, status_text):
     if 'Telephone' not in df_result.columns:
         df_result['Telephone'] = ''
     
-    total_urls = len(df_result)
+    # Obtenir la liste des URLs à traiter
+    urls = df['URL'].dropna().tolist()
+    total_urls = len(urls)
     processed = 0
     
-    # Nombre de workers (processus parallèles)
-    max_workers = multiprocessing.cpu_count() * 2
+    # Définir le nombre maximum de workers
+    max_workers = min(multiprocessing.cpu_count() * 2, 8)  # 8 workers maximum
     
-    # Créer un dictionnaire des URLs à traiter
-    url_dict = {index: row['URL'].strip() 
-                for index, row in df_result.iterrows() 
-                if pd.notna(row['URL'])}
+    # Taille des lots (batch)
+    batch_size = 100
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Soumettre les tâches
-        future_to_url = {executor.submit(process_single_url, url): (index, url) 
-                        for index, url in url_dict.items()}
+    # Traiter par lots
+    for start_idx in range(0, total_urls, batch_size):
+        end_idx = min(start_idx + batch_size, total_urls)
+        batch_urls = urls[start_idx:end_idx]
         
-        # Traiter les résultats au fur et à mesure
-        for future in as_completed(future_to_url):
-            index, url = future_to_url[future]
-            try:
-                emails, phones = future.result()
-                df_result.loc[index, 'Mail'] = emails
-                df_result.loc[index, 'Telephone'] = phones
-            except Exception as e:
-                print(f"Error processing URL {url}: {str(e)}")
-                df_result.loc[index, 'Mail'] = f"Erreur: {str(e)}"
-                df_result.loc[index, 'Telephone'] = f"Erreur: {str(e)}"
+        status_text.text(f"Traitement du lot {start_idx//batch_size + 1}/{(total_urls-1)//batch_size + 1}...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {executor.submit(process_single_url, url): (i + start_idx, url) 
+                             for i, url in enumerate(batch_urls)}
             
-            processed += 1
-            progress_bar.progress(processed / total_urls)
-            status_text.text(f"Traitement de l'URL {processed}/{total_urls}")
+            for future in as_completed(future_to_url):
+                index, url = future_to_url[future]
+                try:
+                    emails, phones = future.result()
+                    # Filtrer les emails
+                    emails = filter_emails(emails)
+                    # Mise à jour du DataFrame
+                    df_result.loc[index, 'Mail'] = emails
+                    df_result.loc[index, 'Telephone'] = phones
+                except Exception as e:
+                    df_result.loc[index, 'Mail'] = f"ERREUR: {str(e)}"
+                    df_result.loc[index, 'Telephone'] = ""
+                
+                processed += 1
+                progress_bar.progress(processed / total_urls)
+                status_text.text(f"Traitement des URLs... {processed}/{total_urls}")
     
     return df_result
 
