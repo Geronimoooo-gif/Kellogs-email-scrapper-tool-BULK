@@ -19,7 +19,7 @@ def filter_emails(emails_string):
         return ""
     
     # Liste des domaines à exclure
-    excluded_domains = ["@ovh.com", "@ovh.net", "@simplebo.fr", "@mediateur-consommation-avocat.fr"]
+    excluded_domains = ["@ovh.com", "@ovh.net", "@simplebo.fr", "@mediateur-consommation-avocat.fr", "@mediateur-consommation.fr", "@domaine.fr"]
     
     # Liste des préfixes à exclure
     excluded_prefixes = [
